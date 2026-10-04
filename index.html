@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Who Is Lying?</title>
+<style>
+:root{--bg:#060a14;--card:#0f1830;--line:#1f2d52;--ac:#d9b25a;--tx:#e9edf7;--mu:#8995b3;--rd:#ff5d62;--gr:#46d9a0}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 Georgia,'Times New Roman',serif;min-height:100vh}
+#app{max-width:480px;margin:auto;padding:max(16px,env(safe-area-inset-top)) 16px 24px;display:flex;flex-direction:column;gap:12px}
+h1{text-align:center;color:var(--ac);font-size:1.6rem;margin:8px 0}
+h2,h3{margin:0 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
+button,input{font:inherit;border-radius:12px;border:0;padding:16px;width:100%}
+input{background:#0a1224;color:var(--tx);border:1px solid #2a3a66}
+button{background:var(--ac);color:#15120a;font-weight:700}
+button.s{background:#1a2748;color:var(--tx)}
+button:disabled{opacity:.4}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.t{font-size:2.2rem;text-align:center;color:var(--ac);font-variant-numeric:tabular-nums}
+.pl{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line)}
+.off{opacity:.4}
+.sys{color:var(--mu);font-style:italic}
+.c{text-align:center}
+#chat{height:38vh;overflow:auto;display:flex;flex-direction:column;gap:6px}
+.sel{outline:2px solid var(--ac)}
+.err{color:var(--rd)}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const S = io();
+let st = null, tab = 'chat', msg = '', off = 0;
+let tok = sessionStorage.getItem('tok'), code = sessionStorage.getItem('code');
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const $ = id => document.getElementById(id);
+
+function enter(r) {
+  if (r.error) { msg = r.error; return draw(); }
+  tok = r.token; code = r.code; msg = '';
+  sessionStorage.setItem('tok', tok); sessionStorage.setItem('code', code);
+}
+function create() { S.emit('create', { name: $('nm').value }, enter); }
+function join() { S.emit('join', { code: $('cd').value, name: $('nm').value }, enter); }
+function send() {
+  const i = $('ci'); if (i.value.trim()) S.emit('chat', { text: i.value });
+  i.value = ''; return false;
+}
+function go(t) { tab = t; draw(); }
+
+S.on('state', s => {
+  if (!st || st.phase !== s.phase) tab = s.phase === 'vote' ? 'vote' : 'chat';
+  off = s.now - Date.now(); st = s; draw();
+});
+S.on('err', m => { msg = m; draw(); });
+S.on('connect', () => {
+  msg = '';
+  if (tok && code) S.emit('rejoin', { code, token: tok }, r => {
+    if (r.error) { sessionStorage.clear(); tok = code = null; st = null; }
+    draw();
+  });
+  else draw();
+});
+S.on('disconnect', () => { msg = 'Connection lost. Reconnecting...'; draw(); });
+
+function clock() {
+  const el = $('tm'); if (!el || !st || !st.endsAt) return;
+  const s = Math.max(0, Math.round((st.endsAt - Date.now() - off) / 1000));
+  el.textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+setInterval(clock, 500);
+
+function draw() {
+  const a = $('app'), keep = {}; let focus = null;
+  a.querySelectorAll('input').forEach(i => keep[i.id] = i.value);
+  if (document.activeElement && document.activeElement.id) focus = document.activeElement.id;
+  a.innerHTML = '<h1>🕵️ Who Is Lying?</h1>' + (msg ? `<div class="card err">${esc(msg)}</div>` : '') + view();
+  for (const id in keep) if ($(id)) $(id).value = keep[id];
+  if (focus && $(focus)) $(focus).focus();
+  const c = $('chat'); if (c) c.scrollTop = 1e9;
+  clock();
+}
+
+function view() {
+  if (!st) return `<div class="card"><input id="nm" placeholder="Nickname" maxlength="16"><br><br><input id="cd" placeholder="Room code (to join)" maxlength="6" style="text-transform:uppercase"></div>
+    <button onclick="create()">Create room</button><button class="s" onclick="join()">Join room</button>`;
+
+  if (st.phase === 'lobby') {
+    const n = st.players.length;
+    return `<div class="card"><div class="t">${esc(st.code)}</div><p class="sys c">Share this code with your friends</p>` +
+      [0, 1, 2, 3, 4].map(i => { const p = st.players[i];
+        return `<div class="pl ${p && !p.on ? 'off' : ''}"><span>Player ${i + 1}</span><b>${p ? esc(p.name) + (p.host ? ' 👑' : '') : '—'}</b></div>`; }).join('') + '</div>' +
+      (n < 5 ? '<p class="sys c">Waiting for 5 players...</p>' : '') +
+      (st.host ? `<button onclick="S.emit('start')" ${n < 5 ? 'disabled' : ''}>Start game</button>` : '<p class="sys c">The host will start the game.</p>');
+  }
+
+  if (st.phase === 'reveal') {
+    const r = st.result, L = esc(st.players[r.liar].name);
+    return `<div class="card c"><h2 style="color:${r.caught ? 'var(--gr)' : 'var(--rd)'}">${L} was the liar!<br>${r.caught ? 'Investigators win' : 'The liar wins'}</h2></div>
+    <div class="card"><h3>Votes and points</h3>` + st.players.map((p, i) =>
+      `<div class="pl"><span>${esc(p.name)} → ${r.votes[i] == null ? '—' : esc(st.players[r.votes[i]].name)}</span><b>${p.score} (+${r.delta[i]})</b></div>`).join('') + `</div>
+    <div class="card"><h3>${esc(st.case.t)}</h3><p>${esc(st.case.s)}</p>` + r.clues.map((c, i) =>
+      `<p>${i === r.liar ? '🤫' : '🔎'} <b>${esc(st.players[i].name)}:</b> ${esc(c)}</p>`).join('') + '</div>' +
+      (st.host ? `<button onclick="S.emit('start')">Next round</button>` : '<p class="sys c">Waiting for the host...</p>');
+  }
+
+  const label = { discuss: 'Discussion', tie: 'Tie: second discussion', vote: 'Who is the liar?' }[st.phase];
+  const liar = st.role === 'liar';
+  let body = '';
+  if (tab === 'chat') {
+    body = `<div class="card" id="chat">` + st.chat.map(m => m.sys ? `<div class="sys">${esc(m.t)}</div>` : `<div><b>${esc(m.n)}:</b> ${esc(m.t)}</div>`).join('') + `</div>
+    <form class="row" onsubmit="return send()"><input id="ci" autocomplete="off" maxlength="200" placeholder="Ask or accuse..." ${st.phase === 'vote' ? 'disabled' : ''}><button style="flex:0 0 96px">Send</button></form>`;
+  } else if (tab === 'clue') {
+    body = `<div class="card"><p class="sys">Your private clue</p><p style="font-size:1.15rem">${esc(st.clue)}</p></div>`;
+  } else {
+    body = `<div class="card"><h3>Who is the liar?</h3>` + (st.phase !== 'vote' ? '<p class="sys">Voting opens when the discussion ends.</p>' :
+      st.players.map((p, i) => i === st.me || (st.cand && !st.cand.includes(i)) ? '' :
+        `<button class="s ${st.myVote === i ? 'sel' : ''}" style="margin-bottom:8px" onclick="S.emit('vote',{target:${i}})" ${st.myVote != null ? 'disabled' : ''}>${esc(p.name)}</button>`).join('') +
+      (st.myVote != null ? '<p class="sys">Vote locked. Votes are revealed when everyone has voted or time runs out.</p>' : '')) +
+      '<p>' + st.players.map(p => `${esc(p.name)} ${p.voted ? '✅' : '⏳'}`).join(' &nbsp; ') + '</p></div>';
+  }
+  return `<div class="card c"><b>${esc(st.case.t)}</b><br>${esc(st.case.s)}<div class="t" id="tm">--:--</div><small class="sys">${label}</small></div>
+  <div class="card c">${liar ? '🤫 You are the liar<br><small>Your objective is to deceive the other players.</small>' : '🔎 You are an investigator<br><small>Find the liar.</small>'}</div>
+  <div class="card">${st.players.map(p => `<span class="${p.on ? '' : 'off'}">${esc(p.name)}${p.on ? '' : ' (disconnected)'}</span>`).join(' · ')}</div>
+  <div class="row"><button class="${tab === 'chat' ? '' : 's'}" onclick="go('chat')">Chat</button><button class="${tab === 'clue' ? '' : 's'}" onclick="go('clue')">Clue</button><button class="${tab === 'vote' ? '' : 's'}" onclick="go('vote')">Vote</button></div>` + body;
+}
+draw();
+</script>
+</body>
+</html>
